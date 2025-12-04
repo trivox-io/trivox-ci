@@ -10,6 +10,10 @@ on:
         required: false
         type: string
         default: "src/mini_arcade_core"
+      apt-deps:
+        required: false
+        type: string
+        default: ""
     secrets:
       SLACK_BOT_TOKEN:
         required: false
@@ -48,6 +52,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Install system dependencies (apt)
+        if: ${{ inputs.apt-deps != '' && runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ inputs.apt-deps }}
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
