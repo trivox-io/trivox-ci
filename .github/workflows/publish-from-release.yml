@@ -17,6 +17,11 @@ on:
         required: false
         type: string
         default: ""
+      poetry-build-args:
+        description: "Extra arguments to pass to 'poetry build'"
+        required: false
+        type: string
+        default: ""
     secrets:
       PYPI_API_TOKEN:
         required: true
@@ -278,7 +283,7 @@ jobs:
           pip install "poetry>=2.0.0"
 
       - name: Build distributions
-        run: poetry build
+        run: poetry build ${{ inputs.poetry-build-args }}
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
