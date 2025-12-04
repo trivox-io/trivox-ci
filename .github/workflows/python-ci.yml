@@ -76,6 +76,10 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
 
+    env:
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+
     steps:
       # 1) Duration
       - name: Calculate pipeline duration
@@ -189,12 +193,12 @@ jobs:
 
           echo "payload=$(echo "$payload" | jq -c .)" >> "$GITHUB_OUTPUT"
 
-      # 5) Send Slack (only if secrets are present)
+      # 5) Send Slack
       - name: Slack Notification
-        if: ${{ secrets.SLACK_BOT_TOKEN != '' && secrets.SLACK_CHANNEL_ID != '' }}
+        if: env.SLACK_BOT_TOKEN != '' && env.SLACK_CHANNEL_ID != ''
         uses: slackapi/slack-github-action@v1.24.0
         with:
-          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          channel-id: ${{ env.SLACK_CHANNEL_ID }}
           payload: ${{ steps.payload.outputs.payload }}
         env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_BOT_TOKEN: ${{ env.SLACK_BOT_TOKEN }}
