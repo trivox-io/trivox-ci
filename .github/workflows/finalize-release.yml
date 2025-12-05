@@ -1,0 +1,78 @@
+name: Finalize Release
+
+on:
+  workflow_call:
+    inputs:
+      release_branch_suffix:
+        description: "Release suffix or branch (e.g. '0.6' or 'release/0.6')"
+        required: true
+        type: string
+      main_branch:
+        description: "Main branch name"
+        required: false
+        type: string
+        default: "main"
+      develop_branch:
+        description: "Develop branch name"
+        required: false
+        type: string
+        default: "develop"
+
+permissions:
+  contents: write
+
+jobs:
+  finalize-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge release branch into main and develop
+        env:
+          SUFFIX: ${{ inputs.release_branch_suffix }}
+          MAIN_BRANCH: ${{ inputs.main_branch }}
+          DEVELOP_BRANCH: ${{ inputs.develop_branch }}
+        run: |
+          set -e
+
+          # Accept either "0.6" or "release/0.6"
+          if [[ "$SUFFIX" == release/* ]]; then
+            RELEASE_BRANCH="$SUFFIX"
+          else
+            RELEASE_BRANCH="release/${SUFFIX}"
+          fi
+
+          echo "Finalizing release from branch ${RELEASE_BRANCH}"
+
+          git fetch origin
+
+          # Sanity check
+          if ! git ls-remote --exit-code --heads origin "${RELEASE_BRANCH}" > /dev/null; then
+            echo "ERROR: Branch ${RELEASE_BRANCH} does not exist on origin."
+            exit 1
+          fi
+
+          # Merge release -> main
+          git checkout "$MAIN_BRANCH"
+          git pull origin "$MAIN_BRANCH"
+          echo "Merging ${RELEASE_BRANCH} into ${MAIN_BRANCH}..."
+          git merge --no-ff "origin/${RELEASE_BRANCH}" -m "Merge ${RELEASE_BRANCH} into ${MAIN_BRANCH}"
+          git push origin "$MAIN_BRANCH"
+
+          # Merge release -> develop
+          git checkout "$DEVELOP_BRANCH"
+          git pull origin "$DEVELOP_BRANCH"
+          echo "Merging ${RELEASE_BRANCH} into ${DEVELOP_BRANCH}..."
+          git merge --no-ff "origin/${RELEASE_BRANCH}" -m "Merge ${RELEASE_BRANCH} into ${DEVELOP_BRANCH}"
+          git push origin "$DEVELOP_BRANCH"
+
+          echo "Finalize release completed for ${RELEASE_BRANCH}."
