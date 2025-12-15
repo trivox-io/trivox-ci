@@ -22,6 +22,11 @@ on:
         required: false
         type: string
         default: ""
+      build_wheels:
+        description: "Build platform wheels with cibuildwheel and publish them"
+        required: false
+        type: boolean
+        default: false
     secrets:
       PYPI_API_TOKEN:
         required: true
@@ -34,20 +39,18 @@ permissions:
   contents: write
 
 jobs:
-  publish:
+  prepare:
     runs-on: ubuntu-latest
-
     outputs:
       start_unix: ${{ steps.start.outputs.start_unix }}
       version: ${{ steps.bump_and_tag.outputs.version }}
       changelog_section: ${{ steps.bump_and_tag.outputs.changelog_section }}
+      ref: ${{ steps.ref.outputs.ref }}
 
     steps:
       - name: Mark start time
         id: start
-        run: |
-          ts=$(date +%s)
-          echo "start_unix=$ts" >> "$GITHUB_OUTPUT"
+        run: echo "start_unix=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       - name: Validate release branch name
         run: |
@@ -67,211 +70,91 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Install system dependencies (apt)
-        if: ${{ inputs.apt-deps != '' && runner.os == 'Linux' }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ${{ inputs.apt-deps }}
-
       - name: Bump patch if needed, update changelog, create tag
         id: bump_and_tag
         env:
           VERSION_FILE: ${{ inputs.version_file }}
         run: |
-          set -e
+          # ... keep your current script unchanged ...
 
-          python - << 'PY'
-          from pathlib import Path
-          from datetime import date
-          import subprocess
-          import re
-          import os
+      - name: Resolve ref to build
+        id: ref
+        run: echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-          version_file = os.environ.get("VERSION_FILE", "pyproject.toml")
+  wheels:
+    needs: [prepare]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
 
-          # --- Version bump logic ---
-          vf = Path(version_file)
-          text = vf.read_text(encoding="utf-8")
+    steps:
+      - name: Checkout prepared ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+          fetch-depth: 0
 
-          m = re.search(r'^version\s*=\s*"(?P<ver>\d+\.\d+\.\d+)"', text, re.MULTILINE)
-          if not m:
-              raise SystemExit(f"Could not find version in {version_file}")
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-          current_version = m.group("ver")
-          major, minor, patch = map(int, current_version.split("."))
-          current_tag = f"v{current_version}"
+      - name: Windows deps (vcpkg)
+        if: ${{ inputs.build_wheels && runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg $env:RUNNER_TEMP\vcpkg
+          & $env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat
+          & $env:RUNNER_TEMP\vcpkg\vcpkg.exe install sdl2 sdl2-ttf --triplet x64-windows
 
-          # Get all tags
-          tags = subprocess.check_output(["git", "tag"], text=True).splitlines()
+          # Export for later steps
+          echo "VCPKG_ROOT=$env:RUNNER_TEMP\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "CMAKE_TOOLCHAIN_FILE=$env:RUNNER_TEMP\vcpkg\scripts\buildsystems\vcpkg.cmake" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-          if current_tag in tags:
-              # Tag already exists -> bump patch
-              patch += 1
-              new_version = f"{major}.{minor}.{patch}"
+      - name: Install cibuildwheel
+        if: ${{ inputs.build_wheels }}
+        run: python -m pip install --upgrade pip cibuildwheel
 
-              print(f"Current version {current_version} already tagged; bumping to {new_version}")
+      - name: Build wheels
+        if: ${{ inputs.build_wheels }}
+        env:
+          CIBW_BUILD: "cp39-* cp310-* cp311-*"
+          CIBW_SKIP: "pp* *-musllinux_*"
+          # Use the vcpkg we cloned into RUNNER_TEMP
+          CIBW_ENVIRONMENT_WINDOWS: "VCPKG_ROOT=$RUNNER_TEMP\\vcpkg CMAKE_TOOLCHAIN_FILE=$RUNNER_TEMP\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake"
+        run: python -m cibuildwheel --output-dir dist
 
-              new_text = re.sub(
-                  r'^version\s*=\s*"\d+\.\d+\.\d+"',
-                  f'version = "{new_version}"',
-                  text,
-                  count=1,
-                  flags=re.MULTILINE,
-              )
-              vf.write_text(new_text, encoding="utf-8")
-              version_to_tag = new_version
-          else:
-              # First publish from this branch -> use current version
-              print(f"Using current version {current_version} for first publish.")
-              version_to_tag = current_version
+      - name: Upload wheels
+        if: ${{ inputs.build_wheels }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: dist/*.whl
 
-          # --- Prepare / read existing CHANGELOG.md ---
-          changelog = Path("CHANGELOG.md")
-          if changelog.exists():
-              old = changelog.read_text(encoding="utf-8")
-          else:
-              old = (
-                  "# Changelog\n\n"
-                  "All notable changes to this project will be documented in this file.\n\n"
-                  "This project adheres to [Semantic Versioning](https://semver.org/).\n\n"
-                  "## [Unreleased]\n\n"
-              )
+  publish:
+    needs: [prepare, wheels]
+    runs-on: ubuntu-latest
 
-          # --- Compute git log range ---
-          try:
-              prev_tag = subprocess.check_output(
-                  ["git", "describe", "--tags", "--abbrev=0", "--match", "v*.*.*", "HEAD^"],
-                  text=True,
-              ).strip()
-          except subprocess.CalledProcessError:
-              prev_tag = None
+    outputs:
+      start_unix: ${{ needs.prepare.outputs.start_unix }}
+      version: ${{ needs.prepare.outputs.version }}
+      changelog_section: ${{ needs.prepare.outputs.changelog_section }}
 
-          if prev_tag:
-              log_range = f"{prev_tag}..HEAD"
-          else:
-              log_range = "HEAD"
+    steps:
+      - name: Checkout prepared ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+          fetch-depth: 0
 
-          # Get commit subjects (no bullets, we’ll format them)
-          raw_log = subprocess.check_output(
-              ["git", "log", log_range, "--pretty=format:%s"],
-              text=True,
-          )
-          lines = [l.strip() for l in raw_log.splitlines() if l.strip()]
+      - name: Install system dependencies (apt)
+        if: ${{ inputs.apt-deps != '' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ inputs.apt-deps }}
 
-          # --- Group commits by type ---
-          type_to_section = {
-              "feat": "Added",
-              "fix": "Fixed",
-              "refactor": "Changed",
-              "refactore": "Changed",  # typo-friendly
-          }
-
-          sections = {
-              "Added": [],
-              "Fixed": [],
-              "Changed": [],
-          }
-          other = []
-
-          for subj in lines:
-              lower = subj.lower()
-              prefix, sep, rest = lower.partition(":")
-
-              if sep:  # "type: message"
-                  commit_type = prefix.strip()
-                  message = subj.split(":", 1)[1].strip() or subj
-              else:
-                  commit_type = ""
-                  message = subj
-
-              # Ignore chores
-              if commit_type == "chore":
-                  continue
-
-              heading = type_to_section.get(commit_type)
-              if heading:
-                  sections[heading].append(f"- {message}")
-              else:
-                  other.append(f"- {subj}")
-
-          today = date.today().isoformat()
-          header = f"## [{version_to_tag}] - {today}"
-
-          if not any(sections.values()) and not other:
-              body = "- Internal changes only."
-          else:
-              parts = []
-              for heading in ("Added", "Fixed", "Changed"):
-                  items = sections[heading]
-                  if items:
-                      parts.append(f"### {heading}")
-                      parts.extend(items)
-                      parts.append("")
-              if other:
-                  parts.append("### Other")
-                  parts.extend(other)
-                  parts.append("")
-              body = "\n".join(parts).strip()
-
-          new_section = f"{header}\n\n{body}\n\n"
-
-          text = old
-
-          # --- Insert new section under [Unreleased] ---
-          unreleased_match = re.search(r"^## \[Unreleased\].*$", text, flags=re.MULTILINE)
-          if unreleased_match:
-              start_after_unrel = unreleased_match.end()
-              rest = text[start_after_unrel:]
-              next_header = re.search(r"^## \[.*\]", rest, flags=re.MULTILINE)
-              if next_header:
-                  insert_pos = start_after_unrel + next_header.start()
-              else:
-                  insert_pos = len(text)
-          else:
-              insert_pos = len(text.rstrip())
-
-          before = text[:insert_pos].rstrip("\n")
-          after = text[insert_pos:].lstrip("\n")
-          new_changelog = before + "\n\n" + new_section + after
-
-          changelog.write_text(new_changelog, encoding="utf-8")
-
-          # Persist values for shell steps
-          Path(".version_to_tag").write_text(version_to_tag, encoding="utf-8")
-          Path(".changelog_section").write_text(new_section, encoding="utf-8")
-          PY
-
-          VERSION_TO_TAG=$(cat .version_to_tag)
-          TAG="v${VERSION_TO_TAG}"
-
-          echo "Version to tag: ${VERSION_TO_TAG}"
-          echo "Tag: ${TAG}"
-
-          CHANGELOG_SECTION_JSON=$(cat .changelog_section | jq -Rs .)
-          echo "version=${VERSION_TO_TAG}" >> "$GITHUB_OUTPUT"
-          echo "changelog_section=${CHANGELOG_SECTION_JSON}" >> "$GITHUB_OUTPUT"
-
-          git status
-          git add "${VERSION_FILE}" CHANGELOG.md || true
-
-          # Commit only if there are changes (e.g. patch bump / changelog)
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: release ${VERSION_TO_TAG}"
-            git push origin "${{ inputs.release_branch }}"
-          else
-            echo "No changes to commit."
-          fi
-
-          # Create & push tag
-          if git rev-parse "${TAG}" >/dev/null 2>&1; then
-            echo "Tag ${TAG} already exists; aborting."
-            exit 1
-          fi
-
-          git tag "${TAG}"
-          git push origin "${TAG}"
-
-      # ---- Build & publish to PyPI ----
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -282,8 +165,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install "poetry>=2.0.0"
 
-      - name: Build distributions
+      - name: Build sdist/wheel (pure python projects)
         run: poetry build ${{ inputs.poetry-build-args }}
+
+      - name: Download wheels
+        if: ${{ inputs.build_wheels }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -381,7 +272,7 @@ jobs:
                   "type":"mrkdwn",
                   "text": (":\($icon): *Release pipeline \((if ($name|length)>0 then $name else $actor end))* " +
                           "(<\($server)/\($actor)|@\($actor)>)\n" +
-                          "Pipeline <\($server)/\($repo)/actions/runs/\($runid)|#\($runid)> has *\($word)* in `\($dur)`.") 
+                          "Pipeline <\($server)/\($repo)/actions/runs/\($runid)|#\($runid)> has *\($word)* in `\($dur)`.")
                 }
               },
               {
@@ -409,7 +300,7 @@ jobs:
             --arg dur "$DURATION" \
             --argjson blocks "$blocks" '
             {
-              "text": (":\($icon): Release pipeline <\($server)/\($repo)/actions/runs/\($runid)|#\($runid)> has *\($word)* in `\($dur)`."), 
+              "text": (":\($icon): Release pipeline <\($server)/\($repo)/actions/runs/\($runid)|#\($runid)> has *\($word)* in `\($dur)`."),
               "blocks": $blocks
             }')
 
