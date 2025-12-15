@@ -82,12 +82,9 @@ jobs:
         run: echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   wheels:
+    if: ${{ inputs.build_wheels }}
     needs: [prepare]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest]
+    runs-on: windows-latest
 
     steps:
       - name: Checkout prepared ref
@@ -102,35 +99,30 @@ jobs:
           python-version: "3.11"
 
       - name: Windows deps (vcpkg)
-        if: ${{ inputs.build_wheels && runner.os == 'Windows' }}
         shell: pwsh
         run: |
-          git clone https://github.com/microsoft/vcpkg $env:RUNNER_TEMP\vcpkg
-          & $env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat
-          & $env:RUNNER_TEMP\vcpkg\vcpkg.exe install sdl2 sdl2-ttf --triplet x64-windows
-
-          # Export for later steps
-          echo "VCPKG_ROOT=$env:RUNNER_TEMP\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
-          echo "CMAKE_TOOLCHAIN_FILE=$env:RUNNER_TEMP\vcpkg\scripts\buildsystems\vcpkg.cmake" | Out-File -FilePath $env:GITHUB_ENV -Append
+          git clone https://github.com/microsoft/vcpkg "$PWD\vcpkg"
+          & "$PWD\vcpkg\bootstrap-vcpkg.bat"
+          & "$PWD\vcpkg\vcpkg.exe" install sdl2 sdl2-ttf --triplet x64-windows
 
       - name: Install cibuildwheel
-        if: ${{ inputs.build_wheels }}
         run: python -m pip install --upgrade pip cibuildwheel
 
-      - name: Build wheels
-        if: ${{ inputs.build_wheels }}
+      - name: Build wheels (x64 only)
         env:
-          CIBW_BUILD: "cp39-* cp310-* cp311-*"
-          CIBW_SKIP: "pp* *-musllinux_*"
-          # Use the vcpkg we cloned into RUNNER_TEMP
-          CIBW_ENVIRONMENT_WINDOWS: "VCPKG_ROOT=$RUNNER_TEMP\\vcpkg CMAKE_TOOLCHAIN_FILE=$RUNNER_TEMP\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake"
+          CIBW_ARCHS_WINDOWS: "AMD64"
+          CIBW_BUILD: "cp39-win_amd64 cp310-win_amd64 cp311-win_amd64"
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_ENVIRONMENT_WINDOWS: >
+            VCPKG_ROOT={project}/vcpkg
+            CMAKE_TOOLCHAIN_FILE={project}/vcpkg/scripts/buildsystems/vcpkg.cmake
+            SKBUILD_CMAKE_ARGS=-DCMAKE_TOOLCHAIN_FILE={project}/vcpkg/scripts/buildsystems/vcpkg.cmake
         run: python -m cibuildwheel --output-dir dist
 
       - name: Upload wheels
-        if: ${{ inputs.build_wheels }}
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}
+          name: wheels-windows
           path: dist/*.whl
 
   publish:
