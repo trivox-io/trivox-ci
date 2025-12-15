@@ -99,11 +99,12 @@ jobs:
           python-version: "3.11"
 
       - name: Windows deps (vcpkg)
+        if: ${{ inputs.build_wheels && runner.os == 'Windows' }}
         shell: pwsh
         run: |
-          git clone https://github.com/microsoft/vcpkg "$PWD\vcpkg"
-          & "$PWD\vcpkg\bootstrap-vcpkg.bat"
-          & "$PWD\vcpkg\vcpkg.exe" install sdl2 sdl2-ttf --triplet x64-windows
+          git clone https://github.com/microsoft/vcpkg "$env:GITHUB_WORKSPACE\vcpkg"
+          & "$env:GITHUB_WORKSPACE\vcpkg\bootstrap-vcpkg.bat"
+          & "$env:GITHUB_WORKSPACE\vcpkg\vcpkg.exe" install sdl2 sdl2-ttf --triplet x64-windows
 
       - name: Install cibuildwheel
         run: python -m pip install --upgrade pip cibuildwheel
@@ -115,11 +116,11 @@ jobs:
           CIBW_BUILD: "cp39-win_amd64 cp310-win_amd64 cp311-win_amd64"
           CIBW_SKIP: "*-musllinux_*"
 
-          # IMPORTANT: use an absolute path (GitHub workspace), not {project}
+          # IMPORTANT: forward slashes so CMake doesn't treat \a, \t, etc as escapes
           CIBW_ENVIRONMENT_WINDOWS: >-
-            VCPKG_ROOT=${{ github.workspace }}\vcpkg
-            CMAKE_TOOLCHAIN_FILE=${{ github.workspace }}\vcpkg\scripts\buildsystems\vcpkg.cmake
-            CMAKE_ARGS=-DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}\vcpkg\scripts\buildsystems\vcpkg.cmake
+            VCPKG_ROOT=${{ github.workspace }}/vcpkg
+            CMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+            SKBUILD_CMAKE_ARGS=-DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
         run: python -m cibuildwheel --output-dir dist
 
       - name: Upload wheels
