@@ -70,12 +70,197 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      - name: Install system dependencies (apt)
+        if: ${{ inputs.apt-deps != '' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ inputs.apt-deps }}
+
       - name: Bump patch if needed, update changelog, create tag
         id: bump_and_tag
         env:
           VERSION_FILE: ${{ inputs.version_file }}
         run: |
-          # ... keep your current script unchanged ...
+          set -e
+
+          python - << 'PY'
+          from pathlib import Path
+          from datetime import date
+          import subprocess
+          import re
+          import os
+
+          version_file = os.environ.get("VERSION_FILE", "pyproject.toml")
+
+          # --- Version bump logic ---
+          vf = Path(version_file)
+          text = vf.read_text(encoding="utf-8")
+
+          m = re.search(r'^version\s*=\s*"(?P<ver>\d+\.\d+\.\d+)"', text, re.MULTILINE)
+          if not m:
+              raise SystemExit(f"Could not find version in {version_file}")
+
+          current_version = m.group("ver")
+          major, minor, patch = map(int, current_version.split("."))
+          current_tag = f"v{current_version}"
+
+          # Get all tags
+          tags = subprocess.check_output(["git", "tag"], text=True).splitlines()
+
+          if current_tag in tags:
+              # Tag already exists -> bump patch
+              patch += 1
+              new_version = f"{major}.{minor}.{patch}"
+
+              print(f"Current version {current_version} already tagged; bumping to {new_version}")
+
+              new_text = re.sub(
+                  r'^version\s*=\s*"\d+\.\d+\.\d+"',
+                  f'version = "{new_version}"',
+                  text,
+                  count=1,
+                  flags=re.MULTILINE,
+              )
+              vf.write_text(new_text, encoding="utf-8")
+              version_to_tag = new_version
+          else:
+              # First publish from this branch -> use current version
+              print(f"Using current version {current_version} for first publish.")
+              version_to_tag = current_version
+
+          # --- Prepare / read existing CHANGELOG.md ---
+          changelog = Path("CHANGELOG.md")
+          if changelog.exists():
+              old = changelog.read_text(encoding="utf-8")
+          else:
+              old = (
+                  "# Changelog\n\n"
+                  "All notable changes to this project will be documented in this file.\n\n"
+                  "This project adheres to [Semantic Versioning](https://semver.org/).\n\n"
+                  "## [Unreleased]\n\n"
+              )
+
+          # --- Compute git log range ---
+          try:
+              prev_tag = subprocess.check_output(
+                  ["git", "describe", "--tags", "--abbrev=0", "--match", "v*.*.*", "HEAD^"],
+                  text=True,
+              ).strip()
+          except subprocess.CalledProcessError:
+              prev_tag = None
+
+          if prev_tag:
+              log_range = f"{prev_tag}..HEAD"
+          else:
+              log_range = "HEAD"
+
+          raw_log = subprocess.check_output(
+              ["git", "log", log_range, "--pretty=format:%s"],
+              text=True,
+          )
+          lines = [l.strip() for l in raw_log.splitlines() if l.strip()]
+
+          type_to_section = {
+              "feat": "Added",
+              "fix": "Fixed",
+              "refactor": "Changed",
+              "refactore": "Changed",
+          }
+
+          sections = {"Added": [], "Fixed": [], "Changed": []}
+          other = []
+
+          for subj in lines:
+              lower = subj.lower()
+              prefix, sep, rest = lower.partition(":")
+
+              if sep:
+                  commit_type = prefix.strip()
+                  message = subj.split(":", 1)[1].strip() or subj
+              else:
+                  commit_type = ""
+                  message = subj
+
+              if commit_type == "chore":
+                  continue
+
+              heading = type_to_section.get(commit_type)
+              if heading:
+                  sections[heading].append(f"- {message}")
+              else:
+                  other.append(f"- {subj}")
+
+          today = date.today().isoformat()
+          header = f"## [{version_to_tag}] - {today}"
+
+          if not any(sections.values()) and not other:
+              body = "- Internal changes only."
+          else:
+              parts = []
+              for heading in ("Added", "Fixed", "Changed"):
+                  items = sections[heading]
+                  if items:
+                      parts.append(f"### {heading}")
+                      parts.extend(items)
+                      parts.append("")
+              if other:
+                  parts.append("### Other")
+                  parts.extend(other)
+                  parts.append("")
+              body = "\n".join(parts).strip()
+
+          new_section = f"{header}\n\n{body}\n\n"
+
+          text = old
+          unreleased_match = re.search(r"^## \[Unreleased\].*$", text, flags=re.MULTILINE)
+          if unreleased_match:
+              start_after_unrel = unreleased_match.end()
+              rest = text[start_after_unrel:]
+              next_header = re.search(r"^## \[.*\]", rest, flags=re.MULTILINE)
+              if next_header:
+                  insert_pos = start_after_unrel + next_header.start()
+              else:
+                  insert_pos = len(text)
+          else:
+              insert_pos = len(text.rstrip())
+
+          before = text[:insert_pos].rstrip("\n")
+          after = text[insert_pos:].lstrip("\n")
+          new_changelog = before + "\n\n" + new_section + after
+
+          changelog.write_text(new_changelog, encoding="utf-8")
+
+          Path(".version_to_tag").write_text(version_to_tag, encoding="utf-8")
+          Path(".changelog_section").write_text(new_section, encoding="utf-8")
+          PY
+
+          VERSION_TO_TAG=$(cat .version_to_tag)
+          TAG="v${VERSION_TO_TAG}"
+
+          echo "Version to tag: ${VERSION_TO_TAG}"
+          echo "Tag: ${TAG}"
+
+          CHANGELOG_SECTION_JSON=$(cat .changelog_section | jq -Rs .)
+          echo "version=${VERSION_TO_TAG}" >> "$GITHUB_OUTPUT"
+          echo "changelog_section=${CHANGELOG_SECTION_JSON}" >> "$GITHUB_OUTPUT"
+
+          git status
+          git add "${VERSION_FILE}" CHANGELOG.md || true
+
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: release ${VERSION_TO_TAG}"
+            git push origin "${{ inputs.release_branch }}"
+          else
+            echo "No changes to commit."
+          fi
+
+          if git rev-parse "${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists; aborting."
+            exit 1
+          fi
+
+          git tag "${TAG}"
+          git push origin "${TAG}"
 
       - name: Resolve ref to build
         id: ref
@@ -137,6 +322,9 @@ jobs:
   publish:
     needs: [prepare, wheels]
     runs-on: ubuntu-latest
+    # This makes publish run even when wheels is skipped (build_wheels=false),
+    # but still block if build_wheels=true and wheels failed.
+    if: ${{ always() && needs.prepare.result == 'success' && (!inputs.build_wheels || needs.wheels.result == 'success') }}
 
     outputs:
       start_unix: ${{ needs.prepare.outputs.start_unix }}
